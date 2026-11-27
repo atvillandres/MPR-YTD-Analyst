@@ -326,6 +326,14 @@ def analyze_irs(rows: list[dict], year: int, as_of: date) -> dict:
 def analyze_mrs(rows: list[dict], year: int, as_of: date) -> dict:
     by_month: dict[int, dict] = {}
 
+    # Outstanding as of Dec prior year / Jan beginning balance:
+    # all MRs opened in the prior calendar year.
+    beginning_rows = [
+        r
+        for r in rows
+        if as_date(r["opened"]) is not None and as_date(r["opened"]).year == year - 1
+    ]
+
     for month in range(1, 13):
         if date(year, month, 1) > as_of:
             continue
@@ -342,6 +350,14 @@ def analyze_mrs(rows: list[dict], year: int, as_of: date) -> dict:
             if r["state"] in CANCELED_STATES
             and in_month(r["opened"], year, month, as_of)
         ]
+        # Prior-year opens that are cancelled with no cancel/closed date:
+        # attribute to January so they leave the outstanding balance.
+        if month == 1:
+            canceled.extend(
+                r
+                for r in beginning_rows
+                if r["state"] in CANCELED_STATES and as_date(r["closed"]) is None
+            )
         by_app: dict = defaultdict(
             lambda: {
                 "received": 0,
@@ -392,6 +408,7 @@ def analyze_mrs(rows: list[dict], year: int, as_of: date) -> dict:
     accomplishments.sort(key=lambda x: x["closed"] or date.min, reverse=True)
 
     return {
+        "beginning_balance": Counter(r["app"] for r in beginning_rows),
         "by_month": by_month,
         "outstanding_as_of": Counter(
             r["app"] for r in mr_outstanding_as_of(rows, as_of)
@@ -418,11 +435,13 @@ def fill_workbook(
     adhoc = wb["Completed Adhoc MR YTD Totals"]
     key_acc = wb["MR - Key Acconplishment"]
 
-    # Preserve template Jan MR beginning balance (B297) when extract has no prior-year BB.
-    # IR beginning balance from extract.
+    # January beginning balances (Outstanding as of Dec prior year)
     for app, count in ir_analysis["beginning_balance"].items():
         if app == "TMS":
             mpr["D297"] = count
+    if mr_analysis:
+        # Replace template MR BB with count of MRs opened in prior year.
+        mpr["B297"] = mr_analysis["beginning_balance"].get("TMS", 0)
 
     for month, data in ir_analysis["by_month"].items():
         if month not in MPR_TMS_ROWS or date(year, month, 1) > as_of:
@@ -544,6 +563,7 @@ def print_summary(ir_analysis: dict, mr_analysis: dict | None, as_of: date) -> N
         )
     if not mr_analysis:
         return
+    print(f"MR beginning balance (prior-year opens): {dict(mr_analysis['beginning_balance'])}")
     print(f"MR outstanding: {dict(mr_analysis['outstanding_as_of'])}")
     for month in sorted(mr_analysis["by_month"]):
         tms = mr_analysis["by_month"][month]["by_app"].get("TMS", {})
